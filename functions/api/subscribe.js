@@ -4,25 +4,30 @@
 //
 // Required in Cloudflare:
 //   MAILERLITE_API_KEY   (type: Secret) your MailerLite API token
-// Optional in Cloudflare (only if you want different group names):
-//   ML_GROUP_RESULTS     default "Quiz – results only"   (everyone)
-//   ML_GROUP_NEWSLETTER  default "Skillseed newsletter"   (only if they ticked the box)
-//   ML_GROUP_KANGKONG    default "Quiz – Kang Kong"
-//   ML_GROUP_CHILLI      default "Quiz – Chilli"
-//   ML_GROUP_PAPAYA      default "Quiz – Papaya"
-//   ML_USE_FIELDS        default "yes": also fill text fields quiz_seed and quiz_consent
-// Groups and fields are found by name, and created in MailerLite if missing.
-// A value made only of digits is treated as a MailerLite group ID.
+// Optional in Cloudflare (a group's ID, or its exact name):
+//   ML_GROUP_RESULTS     everyone who enters an email   (default: the "Quiz – seed results only" group)
+//   ML_GROUP_NEWSLETTER  only if they ticked the box    (default: the "Skillseed Personality Quiz" group)
+//   ML_GROUP_KANGKONG / ML_GROUP_CHILLI / ML_GROUP_PAPAYA   (default: the "Quiz – <seed>" groups)
+//   ML_USE_FIELDS        default "yes": also fill the text fields quiz_seed, quiz_consent, quiz_history
+//
+// Latest result only: each sign-up puts the person in the group of the seed they just got and
+// takes them out of the other two seed groups. Earlier results are kept in quiz_history,
+// e.g. "Chilli (24 Nov 2026); Kang Kong (25 Nov 2026)".
+//
+// Defaults are group IDs, so renaming a group in MailerLite doesn't break anything.
+// A value made only of digits is used as an ID; any other value is looked up by name
+// (and created if no group has that name).
 
 const API = "https://connect.mailerlite.com/api";
 
 const SEEDS = {
-  to:   { name: "Kang Kong", key: "ML_GROUP_KANGKONG", def: "Quiz – Kang Kong" },
-  for:  { name: "Chilli",    key: "ML_GROUP_CHILLI",   def: "Quiz – Chilli" },
-  with: { name: "Papaya",    key: "ML_GROUP_PAPAYA",   def: "Quiz – Papaya" },
+  to:   { name: "Kang Kong", key: "ML_GROUP_KANGKONG", def: "204985628977268611" },
+  for:  { name: "Chilli",    key: "ML_GROUP_CHILLI",   def: "204985629448078460" },
+  with: { name: "Papaya",    key: "ML_GROUP_PAPAYA",   def: "204985629967123898" },
 };
-const DEFAULTS = { ML_GROUP_RESULTS: "Quiz – results only", ML_GROUP_NEWSLETTER: "Skillseed newsletter" };
-const FIELDS = ["quiz_seed", "quiz_consent"];
+const DEFAULTS = { ML_GROUP_RESULTS: "204985630444226068", ML_GROUP_NEWSLETTER: "204985764588554231" };
+const FIELDS = ["quiz_seed", "quiz_consent", "quiz_history"];
+const HISTORY_MAX = 1000; // MailerLite text fields hold up to 1024 characters
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -77,8 +82,33 @@ async function ensureFields(env) {
   } catch { return false; }
 }
 
+// What MailerLite already holds for this email: its earlier quiz history and consent.
+// Returns null when the person is new or the lookup fails (the sign-up still goes ahead).
+async function existing(env, email) {
+  try {
+    const r = await ml(env, `/subscribers/${encodeURIComponent(email)}`);
+    if (!r.ok) return null;
+    const d = (await r.json()).data || {};
+    const f = d.fields || {};
+    return { history: f.quiz_history || "", consent: f.quiz_consent || "" };
+  } catch { return null; }
+}
+
+// "25 Nov 2026" in Singapore time
+function today() {
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Singapore" })
+    .format(new Date());
+}
+
+function addToHistory(history, seedName) {
+  const entry = `${seedName} (${today()})`;
+  let h = history ? `${history}; ${entry}` : entry;
+  while (h.length > HISTORY_MAX && h.includes("; ")) h = h.slice(h.indexOf("; ") + 2); // drop the oldest
+  return h;
+}
+
 // GET /api/subscribe?check=1 checks the setup without showing any secret.
-export async function onRequestGet({ env, request }) {
+export async function onRequestGet({ request, env }) {
   if (new URL(request.url).searchParams.get("check") !== "1") return json({ ok: true });
   if (!env.MAILERLITE_API_KEY) return json({ ok: false, apiKey: "missing" });
   const r = await ml(env, "/groups?limit=1");
@@ -107,16 +137,30 @@ export async function onRequestPost({ request, env }) {
     env[seed.key] || seed.def,
     consent ? (env.ML_GROUP_NEWSLETTER || DEFAULTS.ML_GROUP_NEWSLETTER) : null,
   ].filter(Boolean);
+  const otherSeeds = Object.values(SEEDS).filter(s => s !== seed).map(s => env[s.key] || s.def);
 
-  let groups;
-  try { groups = await Promise.all(names.map(n => groupId(env, n))); }
-  catch (e) { return json({ ok: false, error: e.message || "couldn't reach MailerLite" }, 502); }
+  let groups, otherIds;
+  try {
+    [groups, otherIds] = await Promise.all([
+      Promise.all(names.map(n => groupId(env, n))),
+      Promise.all(otherSeeds.map(n => groupId(env, n))),
+    ]);
+  } catch (e) { return json({ ok: false, error: e.message || "couldn't reach MailerLite" }, 502); }
+
+  const useFields = env.ML_USE_FIELDS !== "no";
+  const [before, fieldsOk] = await Promise.all([
+    existing(env, email),
+    useFields ? ensureFields(env) : Promise.resolve(false),
+  ]);
 
   const payload = { email, groups };
-  if (env.ML_USE_FIELDS !== "no" && await ensureFields(env)) {
+  if (fieldsOk) {
     payload.fields = {
       quiz_seed: seed.name,
-      quiz_consent: consent ? `yes ${new Date().toISOString()}` : "no",
+      // Leaving the box unticked on a retake is not withdrawing: keep an earlier "yes".
+      quiz_consent: consent ? `yes ${new Date().toISOString()}`
+        : (before && before.consent.startsWith("yes") ? before.consent : "no"),
+      quiz_history: addToHistory(before && before.history, seed.name),
     };
   }
 
@@ -127,13 +171,25 @@ export async function onRequestPost({ request, env }) {
     return json({ ok: false, error: "couldn't reach MailerLite, please try again" }, 502);
   }
 
-  if (res.ok) return json({ ok: true, seedName: seed.name, newsletter: consent });
+  if (!res.ok) {
+    let reason = `MailerLite replied ${res.status}`;
+    try {
+      const d = await res.json();
+      if (res.status === 401) reason = "MailerLite rejected the API key";
+      else if (d && d.message) reason = `MailerLite: ${d.message}`;
+    } catch {}
+    return json({ ok: false, error: reason }, 502);
+  }
 
-  let reason = `MailerLite replied ${res.status}`;
-  try {
-    const d = await res.json();
-    if (res.status === 401) reason = "MailerLite rejected the API key";
-    else if (d && d.message) reason = `MailerLite: ${d.message}`;
-  } catch {}
-  return json({ ok: false, error: reason }, 502);
+  // Latest result only: take them out of the other seed groups.
+  // Not being in a group is fine (MailerLite answers 404), and a failure here never blocks the sign-up.
+  let subscriberId = null;
+  try { subscriberId = ((await res.json()).data || {}).id; } catch {}
+  if (subscriberId) {
+    await Promise.all(otherIds.map(gid =>
+      ml(env, `/subscribers/${subscriberId}/groups/${gid}`, { method: "DELETE" }).catch(() => null)
+    ));
+  }
+
+  return json({ ok: true, seedName: seed.name, newsletter: consent });
 }
