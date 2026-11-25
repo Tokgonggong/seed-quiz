@@ -675,7 +675,8 @@ const V={
   <div class="btns"><button class="btn sky" data-a="share">Share</button><button class="btn deep" data-a="again">Retake quiz</button></div>`}</section>`}
 };
 
-let UNL=false;try{UNL=localStorage.getItem("seedq-unl")==="1"}catch(e){}
+/* unlocked = this attempt's email has been entered; every new attempt asks again so each result reaches MailerLite */
+let UNL=false;try{localStorage.removeItem("seedq-unl")}catch(e){}
 const RM=matchMedia("(prefers-reduced-motion: reduce)"),TT="Which Seed Are You?";
 const preload=ks=>ks.forEach(k=>{if(ART[k]){const im=new Image();im.decoding="async";im.src=ART[k]}});
 const render=(anim=true)=>{app.innerHTML=V[S.v]();setG(S.v==="start"?0:S.v==="q"?S.qi:S.v==="load"?4:5);if(anim){app.classList.remove("in");void app.offsetWidth;app.classList.add("in")}
@@ -809,7 +810,7 @@ app.addEventListener("submit",async e=>{const f=e.target;if(f.id!=="gf")return;e
  }catch(err){note="We couldn't save your email just now, but here are your full results."}
  btn.disabled=false;btn.textContent="Show my full results";
  if(!ok){f.email.focus();return}
- UNL=true;try{localStorage.setItem("seedq-unl","1")}catch(e){}
+ UNL=true;
  SFX.tada();render(false);
  const ab=app.querySelector(".box.about");if(ab){window.scrollTo({top:Math.max(0,ab.getBoundingClientRect().top+scrollY-16),behavior:RM.matches?"auto":"smooth"});const h=ab.querySelector("h3");if(h){h.tabIndex=-1;h.focus({preventScroll:true})}}
  toast(note||(f.consent.checked?"Unlocked! Check your inbox, and welcome to the mailing list.":"Unlocked! Check your inbox for your seed results."),note?6000:3200)});
@@ -824,7 +825,7 @@ app.addEventListener("click",e=>{const sm=e.target.closest("summary");if(sm&&sm.
  else if(a==="jump"){e.preventDefault();const t=$("#cx");if(t){window.scrollTo({top:Math.max(0,t.getBoundingClientRect().top+scrollY-16),behavior:RM.matches?"auto":"smooth"});const h=t.querySelector("h3");h&&h.focus({preventScroll:true})}SFX.pop()}
  else if(a==="peek"){S.peek=b.dataset.t;SFX.pop();render()}
  else if(a==="mine"){S.peek=null;SFX.pop();render()}
- else if(a==="again"){stopPick();S.v="start";S.ans=[];S.peek=null;SFX.back();render()}
+ else if(a==="again"){stopPick();S.v="start";S.ans=[];S.peek=null;UNL=false;SFX.back();render()}
  else if(a==="sign"){SFX.pop();if(SIGNUP==="#"){e.preventDefault();toast("Sign-up link coming soon!")}}
  else if(a==="share"){SFX.pop();const txt=`I'm a ${R[result()].name}! 🌱 Which seed are you? ${location.href.split("#")[0]}`;
   const url=location.href.split("#")[0],copy=()=>(navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(()=>toast("Copied! Paste it to your friends"),()=>toast(txt,6000));
